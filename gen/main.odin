@@ -1,4 +1,4 @@
-package vulkan_gen
+package vulkan_generator
 
 import "core:os"
 import "core:fmt"
