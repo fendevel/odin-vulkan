@@ -1,1 +1,8 @@
 ols.json
+
+*.exe
+fmtutils
+defines.odin
+enums.odin
+procedures.odin
+structs.odin

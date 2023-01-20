@@ -2159,7 +2159,7 @@ xml_find_command_definition :: proc(doc: ^xml.Document, declaration: xml.Element
     return 0, false
 }
 
-generate_block_size :: proc(b: ^strings.Builder) {
+generate_format_util_block_size :: proc(b: ^strings.Builder) {
     formats_enum_id: Enum_Index = -1
     for e, i in enums_table do if e.type == .Enum && e.name == "VkFormat" {
         formats_enum_id = i
@@ -2188,7 +2188,7 @@ generate_block_size :: proc(b: ^strings.Builder) {
 
 }
 
-generate_block_extent :: proc(b: ^strings.Builder) {
+generate_format_util_block_extent :: proc(b: ^strings.Builder) {
     formats_enum_id: Enum_Index = -1
     for e, i in enums_table do if e.type == .Enum && e.name == "VkFormat" {
         formats_enum_id = i
@@ -2217,6 +2217,34 @@ generate_block_extent :: proc(b: ^strings.Builder) {
 
 }
 
+generate_format_util_is_compressed :: proc(b: ^strings.Builder) {
+    formats_enum_id: Enum_Index = -1
+    for e, i in enums_table do if e.type == .Enum && e.name == "VkFormat" {
+        formats_enum_id = i
+    }
+
+    assert(formats_enum_id != -1)
+
+    strings.write_string(b, "is_compressed :: proc(format: vulkan.Format) -> bool {\n")
+    strings.write_string(b, "\t#partial switch format {\n")
+
+    for f in formats_table {
+        field := enums_table[formats_enum_id].fields[f.enum_field_index]
+
+        for other_field in enums_table[formats_enum_id].fields do if other_field.alias == f.enum_field_index && other_field.value != "" {
+            strings.write_string(b, fmt.tprintf("\t\tcase .{}: fallthrough\n", format_enum_field_name2(enums_table[formats_enum_id], other_field)))
+        }
+
+        strings.write_string(b, fmt.tprintf("\t\tcase .{}: return {}\n", format_enum_field_name2(enums_table[formats_enum_id], field), f.compressed != ""))
+    }
+
+    strings.write_string(b, "\t}\n\n")
+
+    strings.write_string(b, "\treturn false\n")
+
+    strings.write_string(b, "}\n")
+}
+
 generate_formats :: proc() {
 
     formats_enum_id: Enum_Index = -1
@@ -2232,9 +2260,10 @@ generate_formats :: proc() {
     strings.write_string(&b, "import vulkan \"../\"\n")
     strings.write_string(&b, "\n")
 
-    generate_block_size(&b)
-    generate_block_extent(&b)
-    
+    generate_format_util_block_size(&b)
+    generate_format_util_block_extent(&b)
+    generate_format_util_is_compressed(&b)
+
     if !os.exists("../fmtutils") do os.make_directory("../fmtutils")
 
     os.write_entire_file("../fmtutils/formats.odin", b.buf[:])
