@@ -315,7 +315,7 @@ omit_vulkan_prefix :: proc(s: string) -> string {
 
 get_parameter_element_name :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (string, bool) {
     if name, found := xml.find_child_by_ident(doc, id, "name"); found {
-        return doc.elements[name].value, true
+        return doc.elements[name].value[0].(string)
     }
 
     return "", false
@@ -973,6 +973,29 @@ process_member :: proc(doc: ^xml.Document, member_id: xml.Element_ID, parent_mem
     return member
 }
 
+generate_defines_windows :: proc() {
+    b := strings.builder_make()
+
+    strings.write_string(&b, "package vulkan_gen\n\n")
+
+    defines_windows := make([dynamic]Type_Index) 
+    defer delete(defines_windows)
+
+    for t, i in types_table do if t.category == .Misc && t.requires != -1 {
+        if types_table[t.requires].name == "windows.h" {
+            append(&defines_windows, i)
+        } 
+    }
+
+    strings.write_string(&b, fmt.tprintf("\timport \"core:sys/windows\"\n"))
+
+    for i in defines_windows {
+        strings.write_string(&b, fmt.tprintf("\t{0} :: windows.{0}\n", types_table[i].name))
+    }
+
+    os.write_entire_file("../defines_windows.odin", b.buf[:])
+}
+
 generate_defines :: proc() {
 
     b := strings.builder_make()
@@ -986,23 +1009,7 @@ generate_defines :: proc() {
 
     strings.write_string(&b, "\n")    
 
-    defines_windows := make([dynamic]Type_Index) 
-    defer delete(defines_windows)
-
-    for t, i in types_table do if t.category == .Misc && t.requires != -1 {
-        if types_table[t.requires].name == "windows.h" {
-            append(&defines_windows, i)
-        } 
-    }
-
-    strings.write_string(&b, fmt.tprintf("when ODIN_OS == .Windows {{\n"))
-    strings.write_string(&b, fmt.tprintf("\timport \"core:sys/windows\"\n"))
-
-    for i in defines_windows {
-        strings.write_string(&b, fmt.tprintf("\t{0} :: windows.{0}\n", types_table[i].name))
-    }
-
-    strings.write_string(&b, fmt.tprintf("}}\n\n"))
+    generate_defines_windows()
 
     generate_constants(&b)
 
