@@ -10,6 +10,7 @@ import "core:unicode/utf8"
 import "core:strconv"
 import "core:encoding/xml"
 import "core:reflect"
+import "core:runtime"
 
 extensions: []string
 platforms_table: [dynamic]Platform
@@ -37,7 +38,7 @@ Format_Index :: int
 
 Format_Component :: struct {
     name: string,
-    bits: int,
+    bits: Maybe(int),
     numeric_format: Numeric_Format,
     plane_index: int,
 }
@@ -105,7 +106,7 @@ Command :: struct {
     cmd_buffer_level: []string,
     comment: string,
     api: []string,
-    alias: Command_Index,
+    alias: Maybe(Command_Index),
     description: string,
 
     name: string,
@@ -115,12 +116,12 @@ Command :: struct {
 
 Enum_Field :: struct {
     name: string,
-    alias: Enum_Field_Index,
+    alias: Maybe(Enum_Field_Index),
     comment: string,
     api: []string,
     value, 
     bitpos: string,
-    type: Type_Index,
+    type: Maybe(Type_Index),
 
 }
 
@@ -154,18 +155,18 @@ Member :: struct {
     stride: Member_Index,
     comment: string,
 
-    const_length: int,
+    const_length: Maybe(int),
     const_length_literal: int,
 }
 
 Type :: struct {
-    requires: Type_Index,
+    requires: Maybe(Type_Index),
     name: string,
-    alias: Type_Index,
+    alias: Maybe(Type_Index),
     api: []string,
     category: Type_Category,
     comment: string,
-    parent: Type_Index, // used for handle types, the parent also being a handle type
+    parent: Maybe(Type_Index), // used for handle types, the parent also being a handle type
     returned_only: bool,
     struct_extends: []Type_Index, // lists structs that can include this type in their pNext chain
     allow_duplicate: bool, // specifies whether multiple of this type can be used in the pNext chains of the structs in "struct_extends"
@@ -173,11 +174,11 @@ Type :: struct {
 
     nested_types: []Type_Index,
     api_entry: string, // unused?
-    bit_values: Type_Index,
+    bit_values: Maybe(Type_Index),
 
     define_body: string,
     deprecated: bool,
-    enum_definition: Enum_Index,
+    enum_definition: Maybe(Enum_Index),
     members: []Member,
 }
 
@@ -279,21 +280,21 @@ filter_types :: proc(excluded_extensions: []Extension_Index, included_platforms:
 type_is_descendent_of :: proc(child: Type_Index, parent: Type_Index) -> bool {    
     child := child
 
-    for types_table[child].alias != -1 {
-        child = types_table[child].alias
+    for types_table[child].alias != nil {
+        child = types_table[child].alias.?
     }
 
-    if types_table[child].parent == -1 {
+    if types_table[child].parent == nil {
         return false
     }
 
     p := types_table[child].parent
-    for p != -1 {
+    for p != nil {
         if p == parent {
             return true
         }
 
-        p = types_table[p].parent if types_table[p].alias == -1 else types_table[p].alias
+        p = types_table[p.?].alias if types_table[p.?].alias != nil else types_table[p.?].parent
     }
 
     return false
@@ -430,8 +431,8 @@ calc_ptr_decore :: proc(index: Type_Index, var_name: string, array_len: []string
 get_base_command :: proc(command: Command) -> Command {
     c := command
 
-    for c.alias != -1 {
-        return commands_table[c.alias]
+    for c.alias != nil {
+        return commands_table[c.alias.?]
     }
 
     return command
@@ -441,11 +442,11 @@ command_has_return :: proc(c: Command) -> bool {
     return types_table[get_base_command(c).return_type].name != "void"
 }
 
-is_command_kind :: proc(c: Command) -> Command_Kind {
-    c := c
+is_command_kind :: proc(command: Command) -> Command_Kind {
+    c := command
 
-    for c.alias != -1 {
-        c = commands_table[c.alias]
+    for c.alias != nil {
+        c = commands_table[c.alias.?]
     }
 
     if c.parameters == nil {
@@ -505,7 +506,7 @@ generate_parameter_list :: proc(b: ^strings.Builder, command: Command, param_nam
 generate_command_signature :: proc(command: Command, b: ^strings.Builder, mode: enum { func, type, pointer }) {
     c := get_base_command(command)
     
-    name := c.name if c.alias == -1 else commands_table[c.alias].name
+    name := c.name if c.alias == nil else commands_table[c.alias.?].name
 
     param_names := make([]string, len(c.parameters), context.temp_allocator)
 
@@ -554,11 +555,11 @@ generate_command_signature :: proc(command: Command, b: ^strings.Builder, mode: 
     }
 }
 
-get_parameter :: proc(doc: ^xml.Document, id: xml.Element_ID, params: []xml.Element_ID) -> (Parameter, bool) {
-    result: Parameter
+process_parameter :: proc(doc: ^xml.Document, id: xml.Element_ID, params: []xml.Element_ID) -> (result: Parameter, good: bool) {
+    attribs := get_element(doc, id)
 
-    if api, good := xml.find_attribute_val_by_key(doc, id, "api"); good {
-        result.api = strings.split(api, ",")
+    if "api" in attribs {
+        result.api = process_api_tokens(attribs) or_return
     }
 
     if len_value, good := xml.find_attribute_val_by_key(doc, id, "len"); good {
@@ -637,13 +638,24 @@ get_parameter :: proc(doc: ^xml.Document, id: xml.Element_ID, params: []xml.Elem
     return result, true
 }
 
-process_command :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Command, bool) {
-    result: Command = {
-        alias = -1,
-        return_type = -1,
+process_api_tokens :: proc(attribs: map[string]string, allocator := context.allocator) -> ([]string, bool) {
+    api_tokens := strings.split(attribs["api"], ",", allocator)
+    
+    if slice.contains(api_tokens, "vulkansc") {
+        delete(api_tokens, allocator)
+        return nil, false
     }
 
+    return api_tokens, true
+}
+
+process_command :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (result: Command, good: bool) {
+
     attribs := get_element(doc, id)
+
+    if "api" in attribs {
+        result.api = process_api_tokens(attribs) or_return
+    }
 
     if "tasks" in attribs {
         result.tasks = strings.split(attribs["tasks"], ",")
@@ -677,10 +689,6 @@ process_command :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Command, boo
         result.comment = attribs["comment"]
     }
 
-    if "api" in attribs {
-        result.api = strings.split(attribs["api"], ",")
-    }
-
     if "description" in attribs {
         result.description = attribs["description"]
     }
@@ -710,7 +718,7 @@ process_command :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Command, boo
 
     params := make([dynamic]Parameter, 0, len(doc.elements[id].children), context.temp_allocator)
     for param_id in doc.elements[id].children do if doc.elements[param_id].ident == "param" {
-        if param, good := get_parameter(doc, param_id, doc.elements[id].children[:]); good {
+        if param, good := process_parameter(doc, param_id, doc.elements[id].children[:]); good {
             append(&params, param)
         }
     }
@@ -844,9 +852,12 @@ find_member_element_index_of_name :: proc(doc: ^xml.Document, members: []xml.Ele
     return -1, false
 }
 
-process_member :: proc(doc: ^xml.Document, member_id: xml.Element_ID, parent_members: []xml.Element_ID) -> Member {
-    member: Member = {
-        const_length = -1,
+process_member :: proc(doc: ^xml.Document, member_id: xml.Element_ID, parent_members: []xml.Element_ID) -> (member: Member, good: bool) {
+
+    attribs := get_element(doc, member_id)
+
+    if "api" in attribs {
+        member.api = process_api_tokens(attribs) or_return
     }
 
     if name_tag, found := xml.find_child_by_ident(doc, member_id, "name"); found {
@@ -862,10 +873,6 @@ process_member :: proc(doc: ^xml.Document, member_id: xml.Element_ID, parent_mem
         assert(good)
 
         member.type = type_index
-    }
-
-    if api, good := xml.find_attribute_val_by_key(doc, member_id, "api"); good {
-        member.api = strings.split(api, ",")
     }
 
     if values, good := xml.find_attribute_val_by_key(doc, member_id, "values"); good {
@@ -970,7 +977,7 @@ process_member :: proc(doc: ^xml.Document, member_id: xml.Element_ID, parent_mem
         
     }
 
-    return member
+    return member, true
 }
 
 generate_defines_windows :: proc() {
@@ -1004,7 +1011,7 @@ generate_defines :: proc() {
     strings.write_string(&b, "import \"core:c\"\n\n")
 
     for t in types_table do if t.category == .Define {
-        generate_type(t, &b, .Define)
+        generate_type(options, t, &b, .Define)
     }
 
     strings.write_string(&b, "\n")    
@@ -1024,32 +1031,33 @@ generate_enums :: proc() {
     for t in types_table do if t.category == .Bitmask {
         underlying_type := "Flags64" if len(t.nested_types) > 0 && types_table[t.nested_types[0]].name == "VkFlags64" else "Flags"
 
-        if t.alias != -1 {
-            strings.write_string(&b, fmt.tprintf("{} :: {}\n", format_bitmask_enum_name(t.name), format_bitmask_enum_name(types_table[t.alias].name)))
+        if alias, exists := t.alias.?; exists {
+            strings.write_string(&b, fmt.tprintf("{} :: {}\n", format_bitmask_enum_name(t.name), format_bitmask_enum_name(types_table[alias].name)))
             continue
         }
-        
-        if t.requires == -1 {
-            strings.write_string(&b, fmt.tprintf("{} :: enum {} {{}}\n", format_bitmask_enum_name(t.name), underlying_type))
-        } else {
-            bitmask_type := types_table[t.requires]
+
+        if requires, exists := t.requires.?; exists {
+            bitmask_type := types_table[requires]
             strings.write_string(&b, fmt.tprintf("{} :: bit_set[{}; {}]\n", omit_vulkan_prefix(t.name), format_bitmask_enum_name(bitmask_type.name), underlying_type))
         
-            for e in enums_table do if e.name == types_table[t.requires].name {
+            for e in enums_table do if e.name == types_table[requires].name {
                 generate_enum(e, &b)
                 break
             }
+        } else {
+            strings.write_string(&b, fmt.tprintf("{} :: enum {} {{}}\n", format_bitmask_enum_name(t.name), underlying_type))
         }
+        
         strings.write_string(&b, "\n")
     }
 
     outer: for t in types_table do if t.category == .Enum {
-        if t.alias != -1 {
-            for e in enums_table do if e.type == .Bitmask && e.name == types_table[t.alias].name {
+        if alias, exists := t.alias.?; exists {
+            for e in enums_table do if e.type == .Bitmask && e.name == types_table[alias].name {
                 continue outer
             }
 
-            strings.write_string(&b, fmt.tprintf("{} :: {}\n", format_bitmask_enum_name(t.name), format_bitmask_enum_name(types_table[t.alias].name)))
+            strings.write_string(&b, fmt.tprintf("{} :: {}\n", format_bitmask_enum_name(t.name), format_bitmask_enum_name(types_table[alias].name)))
             continue
         }
 
@@ -1073,8 +1081,8 @@ generate_constants :: proc(b: ^strings.Builder) {
                     strings.write_string(b, fmt.tprintf("{} :: false\n", omit_vulkan_prefix(f.name)))
                 }
                 case: {
-                    if f.alias != -1 {
-                        strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(f.name), omit_vulkan_prefix(e.fields[f.alias].name)))
+                    if alias, exists := f.alias.?; exists {
+                        strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(f.name), omit_vulkan_prefix(e.fields[alias].name)))
                     } else if strings.has_prefix(f.value, "(~") && strings.has_suffix(f.value, ")") {
                         value_str := strings.trim_suffix(strings.trim_prefix(f.value, "(~"), ")")
 
@@ -1108,7 +1116,7 @@ get_extension_from_name :: proc(name: string) -> Extension_Index {
     return -1
 }
 
-generate_types :: proc() {
+generate_types :: proc(options: Options) {
     b := strings.builder_make()
 
     strings.write_string(&b, "package vulkan_gen\n\n")
@@ -1129,15 +1137,15 @@ generate_types :: proc() {
 
     filtered_types := filter_types(bad_extensions, {"win32"})
 
-    for t in filtered_types do generate_type(types_table[t], &b, .Basetype)
+    for t in filtered_types do generate_type(options, types_table[t], &b, .Basetype)
     strings.write_string(&b, "\n")
-    for t in filtered_types do generate_type(types_table[t], &b, .Handle)
+    for t in filtered_types do generate_type(options, types_table[t], &b, .Handle)
     strings.write_string(&b, "\n")
-    for t in filtered_types do generate_type(types_table[t], &b, .Function_Pointer)
+    for t in filtered_types do generate_type(options, types_table[t], &b, .Function_Pointer)
     strings.write_string(&b, "\n")
-    for t in filtered_types do generate_type(types_table[t], &b, .Struct)
+    for t in filtered_types do generate_type(options, types_table[t], &b, .Struct)
     strings.write_string(&b, "\n")
-    for t in filtered_types do generate_type(types_table[t], &b, .Union)
+    for t in filtered_types do generate_type(options, types_table[t], &b, .Union)
     strings.write_string(&b, "\n")
 
     os.write_entire_file("../structs.odin", b.buf[:])
@@ -1154,7 +1162,7 @@ make_api_version :: proc(variant, major, minor, patch: u32) -> u32 {
 get_flags_of_bitflags :: proc(type: Type_Index) -> (string, bool) {
     if types_table[type].category == .Enum {
         for e in enums_table do if e.type == .Bitmask && e.name == types_table[type].name {
-            for t in types_table do if t.requires != -1 && types_table[t.requires].name == e.name {
+            for t in types_table do if requires, exists := t.requires.?; exists && types_table[requires].name == e.name {
                 return t.name, true
             } 
         }
@@ -1163,7 +1171,7 @@ get_flags_of_bitflags :: proc(type: Type_Index) -> (string, bool) {
     return "", false
 }
 
-generate_member :: proc(b: ^strings.Builder, member: Member, member_names: []string) {
+generate_member :: proc(options: Options, b: ^strings.Builder, member: Member, member_names: []string) {
     decor := calc_ptr_decore(member.type, member.name, member.len, member_names)
     tname := types_table[member.type].name
     tname, decor = map_types_to_odin(tname, decor)
@@ -1172,11 +1180,11 @@ generate_member :: proc(b: ^strings.Builder, member: Member, member_names: []str
         tname = format_bitmask_enum_name(tname)
     }
 
-    if member.comment != "" {
+    if !options.no_comment && member.comment != "" {
         strings.write_string(b, fmt.tprintf("\t// {}\n", member.comment))
     }
 
-    if member.const_length == -1 {
+    if member.const_length == nil {
         if member.const_length_literal == 0 {
 
             if flags_name, flags_found := get_flags_of_bitflags(member.type); flags_found {
@@ -1197,8 +1205,12 @@ generate_member :: proc(b: ^strings.Builder, member: Member, member_names: []str
     }
 }
 
-generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) {
+generate_type :: proc(options: Options, type: Type, b: ^strings.Builder, category: Type_Category) {
     if type.category != category {
+        return
+    }
+
+    if slice.contains(type.api, "vulkansc") {
         return
     }
 
@@ -1212,11 +1224,9 @@ generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) 
             strings.write_string(b, fmt.tprintf("{} :: distinct {}\n", omit_vulkan_prefix(type.name), tname))
         }
         case .Misc: {
-            if type.requires != -1 {
+            // if type.requires != nil {
                 // fmt.println(types_table[type.requires].name, type.name)
-
-
-            }
+            // }
         }
         case .Bitmask: {
             // if type.requires != -1 do strings.write_string(b, fmt.tprintf("\trequires: {},\n", types_table[type.requires].name))
@@ -1230,33 +1240,19 @@ generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) 
             parsed_header_version, parse_good := strconv.parse_uint(header_version_nospace, 10)
             assert(parse_good)
 
-            switch type.name {
-                case "VK_API_VERSION_1_0": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), make_api_version(0, 1, 0, 0)))
-                }
-                case "VK_API_VERSION_1_1": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), make_api_version(0, 1, 1, 0)))
-                }
-                case "VK_API_VERSION_1_2": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), make_api_version(0, 1, 2, 0)))
-                }
-                case "VK_API_VERSION_1_3": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), make_api_version(0, 1, 3, 0)))
-                }
-                case "VK_HEADER_VERSION_COMPLETE": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), make_api_version(0, 1, 3, u32(parsed_header_version))))
-                }
-                case "VK_HEADER_VERSION": {
-                    strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), parsed_header_version))
-                }
-                case "VK_NULL_HANDLE": {
-                }
-                case "VK_USE_64_BIT_PTR_DEFINES": {
-                    strings.write_string(b, fmt.tprintf("{} :: true\n", omit_vulkan_prefix(type.name)))
-                }
-                case: {
-                    return
-                }
+            defines := map[string]string {
+                "VK_API_VERSION_1_0"        = fmt.tprint(make_api_version(0, 1, 0, 0)),
+                "VK_API_VERSION_1_1"        = fmt.tprint(make_api_version(0, 1, 1, 0)),
+                "VK_API_VERSION_1_2"        = fmt.tprint(make_api_version(0, 1, 2, 0)),
+                "VK_API_VERSION_1_3"        = fmt.tprint(make_api_version(0, 1, 3, 0)),
+                "VK_API_VERSION_COMPLETE"   = fmt.tprint(make_api_version(0, 1, 3, u32(parsed_header_version))),
+                "VK_HEADER_VERSION"         = fmt.tprint(u32(parsed_header_version)),
+                "VK_USE_64_BIT_PTR_DEFINES" = "true",
+                "VK_NULL_HANDLE" = "rawptr(uintptr(0))",
+            }
+
+            if value, exists := defines[type.name]; exists {
+                strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), value))
             }
         }
 
@@ -1269,8 +1265,8 @@ generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) 
         }
         
         case .Struct: {
-            if type.alias != -1 {
-                strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), omit_vulkan_prefix(types_table[type.alias].name)))
+            if alias, exists := type.alias.?; exists {
+                strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(type.name), omit_vulkan_prefix(types_table[alias].name)))
 
                 return
             }
@@ -1297,11 +1293,11 @@ generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) 
                 }
             
                 for member in type.members {
-                    generate_member(b, member, member_names)
+                    generate_member(options, b, member, member_names)
                 }
             }
 
-            strings.write_string(b, fmt.tprintf("}}\n"))
+            strings.write_string(b, "}\n")
         }
 
         case .Union: {
@@ -1315,11 +1311,11 @@ generate_type :: proc(type: Type, b: ^strings.Builder, category: Type_Category) 
                 }
             
                 for member in type.members {
-                    generate_member(b, member, member_names)
+                    generate_member(options, b, member, member_names)
                 }
             }
             
-            strings.write_string(b, fmt.tprintf("}}\n"))
+            strings.write_string(b, "}\n")
         }
         
     }
@@ -1361,7 +1357,14 @@ handle_function_pointers :: proc(name: string) {
     }
 }
 
-process_type :: proc(doc: ^xml.Document, type_id: xml.Element_ID) -> (Type, bool) {
+process_type :: proc(doc: ^xml.Document, type_id: xml.Element_ID) -> (result: Type, good: bool) {
+
+    attribs := get_element(doc, type_id)
+
+    if "api" in attribs {
+        result.api = process_api_tokens(attribs) or_return
+    }
+
     map_categories: map[string]Type_Category = {
         "basetype" = .Basetype, 
         "bitmask" = .Bitmask, 
@@ -1375,54 +1378,38 @@ process_type :: proc(doc: ^xml.Document, type_id: xml.Element_ID) -> (Type, bool
         "union" = .Union,
     }
 
-    result: Type = {
-        requires = -1,
-        alias = -1,
-        parent = -1, // used for handle types, the parent also being a handle type
-        bit_values = -1,
-        enum_definition = -1,
-    }
-
-    if category, good := xml.find_attribute_val_by_key(doc, type_id, "category"); good {
+    if category, exists := attribs["category"]; exists {
         assert(category in map_categories)
-
         result.category = map_categories[category]
     }
 
-    if requires, good := xml.find_attribute_val_by_key(doc, type_id, "requires"); good {
+    if requires, good := attribs["requires"]; good {
         required_struct_index, good := search_type_in_xml(doc, requires)
         assert(good)
 
         result.requires = required_struct_index
-    } else if bitvalues, good := xml.find_attribute_val_by_key(doc, type_id, "bitvalues"); good {
+    } else if bitvalues, good := attribs["bitvalues"]; good {
         if bitvalues_index, exists := search_type_in_xml(doc, bitvalues); exists {
             result.requires = bitvalues_index
         }
     }
 
-    if name, good := xml.find_attribute_val_by_key(doc, type_id, "name"); good {
+    if name, exists := attribs["name"]; exists {
         result.name = name
+    } else if name_tag, found := xml.find_child_by_ident(doc, type_id, "name"); found {
+        result.name = doc.elements[name_tag].value
     }
 
-    if alias, good := xml.find_attribute_val_by_key(doc, type_id, "alias"); good {
+    if alias, exists := attribs["alias"]; exists {
         if alias_index, exists := search_type_in_xml(doc, alias); exists {
             result.alias = alias_index
         }
     }
 
-    if api, good := xml.find_attribute_val_by_key(doc, type_id, "api"); good {
-        result.api = strings.split(api, ",")
-    }
+    result.comment = attribs["comment"]
+    result.returned_only = "returnedonly" in attribs
 
-    if comment, good := xml.find_attribute_val_by_key(doc, type_id, "comment"); good {
-        result.comment = comment
-    }
-
-    if returned_only, good := xml.find_attribute_val_by_key(doc, type_id, "returnedonly"); good {
-        result.returned_only = returned_only == "true"
-    }
-
-    if struct_extends, good := xml.find_attribute_val_by_key(doc, type_id, "structextends"); good {
+    if struct_extends, exists := attribs["structextends"]; exists {
         extended_structs := strings.split(struct_extends, ",")
         result.struct_extends = make([]Type_Index, len(extended_structs))
 
@@ -1434,9 +1421,7 @@ process_type :: proc(doc: ^xml.Document, type_id: xml.Element_ID) -> (Type, bool
         }
     }
 
-    if allow_duplicate, good := xml.find_attribute_val_by_key(doc, type_id, "allowduplicate"); good {
-        result.allow_duplicate = allow_duplicate == "true"
-    }
+    result.allow_duplicate = attribs["allowduplicate"] == "true"
 
     if result.category == .Handle {
         if result.name == "" {
@@ -1452,69 +1437,41 @@ process_type :: proc(doc: ^xml.Document, type_id: xml.Element_ID) -> (Type, bool
             result.parent = parent_index
         }
     
-        if object_type_enum, good := xml.find_attribute_val_by_key(doc, type_id, "objtypeenum"); good {
-            result.object_type_enum = object_type_enum
-        }
+        result.object_type_enum = attribs["objtypeenum"]
     }
 
-    if result.category == .Bitmask {
-        if result.name == "" {
-            if name_tag, found := xml.find_child_by_ident(doc, type_id, "name"); found {
-                result.name = doc.elements[name_tag].value
-            }
+    #partial switch result.category {
+        case .Bitmask: {
+            
         }
-    }
-
-    if result.category == .Basetype {
-        if result.name == "" {
-            if name_id, found := xml.find_child_by_ident(doc, type_id, "name"); found {
-                result.name = doc.elements[name_id].value
-            }
+        case .Basetype: {
+            
         }
-    }
-
-    if result.category == .Function_Pointer {
-        if result.name == "" {
-            if name_id, found := xml.find_child_by_ident(doc, type_id, "name"); found {
-                result.name = doc.elements[name_id].value
-            }
+        case .Function_Pointer: {
+            
         }
-    }
-
-    if result.category == .Define {
-        // if we don't have an attribute name then this is probably a function macro
-        if result.name == "" {
-            if name_id, found := xml.find_child_by_ident(doc, type_id, "name"); found {
-                result.name = doc.elements[name_id].value
-            }
-        }
-        
-        result.define_body = doc.elements[type_id].value
-
-        // if strings.has_prefix(doc.elements[type_id].value, "// DEPRECATED: ") {
-        //     result.deprecated = true
-        // }
-
-
-        // switch doc.elements[name].value {
-        //     case "VK_MAKE_VERSION": {
-        //     }
-        //     case "VK_HEADER_VERSION": {
-        //     }
-        // }
-    }
-
-    if result.category == .Struct || result.category == .Union {
-        members := make([dynamic]Member, 0, len(doc.elements[type_id].children))
-        for child_id in doc.elements[type_id].children {
-            if doc.elements[child_id].ident != "member" {
-                continue
-            } 
+        case .Define: {
+            result.define_body = doc.elements[type_id].value
     
-            append(&members, process_member(doc, child_id, doc.elements[type_id].children[:]))
+            // if strings.has_prefix(doc.elements[type_id].value, "// DEPRECATED: ") {
+            //     result.deprecated = true
+            // }
         }
+        case .Struct: fallthrough
+        case .Union: {
+            members := make([dynamic]Member, 0, len(doc.elements[type_id].children))
+            for child_id in doc.elements[type_id].children {
+                if doc.elements[child_id].ident != "member" {
+                    continue
+                }
 
-        result.members = members[:]
+                if member, good := process_member(doc, child_id, doc.elements[type_id].children[:]); good {
+                    append(&members, member)
+                }
+            }
+
+            result.members = members[:]
+        }
     }
 
     if doc.elements[type_id].children != nil {
@@ -1549,7 +1506,7 @@ generate_enum :: proc(e: Enum, b: ^strings.Builder) {
         strings.write_string(b, fmt.tprintf("{} :: enum {} {{\n", format_bitmask_enum_name(bitmask_enum_name), underlying_type))
 
         for field in e.fields {
-            if field.value == "0" || (field.alias != -1 && e.fields[field.alias].value == "0") {
+            if field.value == "0" || (field.alias != nil && e.fields[field.alias.?].value == "0") {
                 continue
             }
 
@@ -1557,21 +1514,21 @@ generate_enum :: proc(e: Enum, b: ^strings.Builder) {
                 continue
             }
 
-            if field.alias != -1 && e.fields[field.alias].value != "" {
+            if alias, exists := field.alias.?; exists && e.fields[alias].value != "" {
                 continue
             }
 
-            if field.alias == -1 {
-                strings.write_string(b, fmt.tprintf("\t\t{} = {},\n", format_enum_field_name2(e, field), field.bitpos if field.value == "" else field.value))
-            } else {
+            if alias_index, exists := field.alias.?; exists {
                 name := format_enum_field_name2(e, field)
-                alias := format_enum_field_name2(e, e.fields[field.alias])
+                alias := format_enum_field_name2(e, e.fields[alias_index])
                 
                 if name == alias {
                     continue
                 }
 
                 strings.write_string(b, fmt.tprintf("\t\t{} = {},\n", name, alias))
+            } else {
+                strings.write_string(b, fmt.tprintf("\t\t{} = {},\n", format_enum_field_name2(e, field), field.bitpos if field.value == "" else field.value))                
             }
         }
 
@@ -1581,17 +1538,19 @@ generate_enum :: proc(e: Enum, b: ^strings.Builder) {
         strings.write_string(b, fmt.tprintf("{} :: enum {} {{\n", omit_vulkan_prefix(e.name), "i32"))
 
         for field in e.fields {
-            if field.alias == -1 {
-                strings.write_string(b, fmt.tprintf("\t{} = {},\n", format_enum_field_name2(e, field), field.value))
+            if alias, exists := field.alias.?; exists {
+                strings.write_string(b, fmt.tprintf("\t{} = {},\n", format_enum_field_name2(e, field), format_enum_field_name2(e, e.fields[alias])))
             } else {
-                strings.write_string(b, fmt.tprintf("\t{} = {},\n", format_enum_field_name2(e, field), format_enum_field_name2(e, e.fields[field.alias])))
+                strings.write_string(b, fmt.tprintf("\t{} = {},\n", format_enum_field_name2(e, field), field.value))
             }
         }
 
         strings.write_string(b, "}\n")
     } else if e.type == .Constants {
         for field in e.fields {
-            if field.alias == -1 {
+            if alias, exists := field.alias.?; exists {
+                strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(field.name), omit_vulkan_prefix(e.fields[alias].name)))
+            } else {
                 val := field.value
                 val, _ = strings.replace(val, "(~0U)", "max(u32)", 1)
                 val, _ = strings.replace(val, "(~1U)", "~u32(1)", 1)
@@ -1600,8 +1559,7 @@ generate_enum :: proc(e: Enum, b: ^strings.Builder) {
                 val, _ = strings.replace(val, "1000.0F", "1000.0", 1)
                 
                 strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(field.name), val))
-            } else {
-                strings.write_string(b, fmt.tprintf("{} :: {}\n", omit_vulkan_prefix(field.name), omit_vulkan_prefix(e.fields[field.alias].name)))
+
             }
         }
         strings.write_string(b, "\n")
@@ -1621,44 +1579,32 @@ find_enum_field_element_index_of_name :: proc(doc: ^xml.Document, fields: []xml.
     return -1, false
 }
 
-get_enum_field :: proc(doc: ^xml.Document, field_id: xml.Element_ID, fields: []xml.Element_ID) -> (Enum_Field, bool) {
-    field: Enum_Field = {
-        alias = -1,
-        type = -1,
-    }
+get_enum_field :: proc(doc: ^xml.Document, field_id: xml.Element_ID, fields: []xml.Element_ID) -> (field: Enum_Field, good: bool) {
 
-    name, good := xml.find_attribute_val_by_key(doc, field_id, "name")
-    assert(good, "required attribute is missing")
+    attribs := get_element(doc, field_id)
 
-    field.name = name
+    field.api = process_api_tokens(attribs) or_return
 
-    if type, good := xml.find_attribute_val_by_key(doc, field_id, "type"); good {
-        type_index, good := search_type_in_xml(doc, type)
+    if name, exists := attribs["name"]; exists {
+        field.name = name
+    } else do panic("required attribute is missing")
+
+    if "type" in attribs {
+        type_index, good := search_type_in_xml(doc, attribs["type"])
         assert(good)
 
         field.type = type_index
     }
 
-    if alias, good := xml.find_attribute_val_by_key(doc, field_id, "alias"); good {
+    if alias, good := attribs["alias"]; good {
         alias_index, good := find_enum_field_element_index_of_name(doc, fields, alias)
         assert(good)
 
         field.alias = alias_index
     }
 
-    if value, good := xml.find_attribute_val_by_key(doc, field_id, "value"); good {
-        field.value = value
-    }
-
-    if bitpos, good := xml.find_attribute_val_by_key(doc, field_id, "bitpos"); good {
-        field.bitpos = bitpos
-    }
-
-
-    if api, good := xml.find_attribute_val_by_key(doc, field_id, "api"); good {
-        field.api = strings.split(api, ",")
-    }
-
+    field.value = attribs["value"] or_else ""
+    field.bitpos = attribs["bitpos"] or_else ""
 
     return field, true
 }
@@ -1717,59 +1663,32 @@ process_enum :: proc(doc: ^xml.Document, enum_id: xml.Element_ID) -> (Enum, bool
 process_extension :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Extension, bool) {
     result: Extension
 
-    if name, good := xml.find_attribute_val_by_key(doc, id, "name"); good {
-        result.name = name
-    }
+    attribs := get_element(doc, id)
 
-    if val, good := xml.find_attribute_val_by_key(doc, id, "comment"); good {
-        result.comment = val
-    }
+    result.name = attribs["name"]
+    result.comment = attribs["comment"]
+    result.author = attribs["author"]
+    result.contact = attribs["contact"]
+    result.requires_core = attribs["requiresCore"]
+    result.platform = attribs["platform"]
+    result.promoted_to = attribs["promotedto"]
+    result.obsoleted_by = attribs["obsoletedby"]
+    result.provisional = attribs["provisional"] == "true"
+    result.number = attribs["number"]
 
-    if val, good := xml.find_attribute_val_by_key(doc, id, "author"); good {
-        result.author = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "contact"); good {
-        result.contact = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "requiresCore"); good {
-        result.requires_core = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "platform"); good {
-        result.platform = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "promotedto"); good {
-        result.promoted_to = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "obsoletedby"); good {
-        result.obsoleted_by = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "provisional"); good {
-        result.provisional = val == "true"
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "supported"); good {
+    if val, good := attribs["supported"]; good {
         result.supported = strings.split(val, ",")
     }
 
-    if val, good := xml.find_attribute_val_by_key(doc, id, "specialuse"); good {
+    if val, good := attribs["specialuse"]; good {
         result.special_use = strings.split(val, ",")
     }
 
-    if val, good := xml.find_attribute_val_by_key(doc, id, "number"); good {
-        result.number = val
-    }
-
-    if val, good := xml.find_attribute_val_by_key(doc, id, "requires"); good {
+    if val, good := attribs["requires"]; good {
         result.requires = strings.split(val, ",")
     }
 
-    if val, good := xml.find_attribute_val_by_key(doc, id, "type"); good {
+    if val, good := attribs["type"]; good {
         result.type = .Device if val == "device" else .Instance
     }
 
@@ -1779,7 +1698,6 @@ process_extension :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Extension,
         ext_types := make([dynamic]Type_Index, 0, len(doc.elements[req].children))
 
         for child in doc.elements[req].children {
-
             switch doc.elements[child].ident {
                 case "type": {
                     name, _ := xml.find_attribute_val_by_key(doc, child, "name")
@@ -1982,12 +1900,7 @@ process_extension_enum :: proc(doc: ^xml.Document, parent, child: xml.Element_ID
     if bitpos, bitpos_good := xml.find_attribute_val_by_key(doc, child, "bitpos"); bitpos_good {
         return {
             name = name,
-            alias = -1,
-            // comment: string,
-            // api: []string,
             bitpos = bitpos,
-            // bitpos: string,
-            type = -1,
         }, true
     }
 
@@ -2013,9 +1926,7 @@ process_extension_enum :: proc(doc: ^xml.Document, parent, child: xml.Element_ID
 
         return {
             name = name,
-            alias = -1,
             value = fmt.aprintf("{}", value),
-            type = -1,
         }, true
     }
 
@@ -2023,9 +1934,7 @@ process_extension_enum :: proc(doc: ^xml.Document, parent, child: xml.Element_ID
         value, _ = strings.replace_all(value, "&quot;", "\"")
         return {
             name = name,
-            alias = -1,
             value = value,
-            type = -1,
         }, true
     }
 
@@ -2125,9 +2034,9 @@ process_basic_types :: proc(doc: ^xml.Document) {
         alias, alias_found := xml.find_attribute_val_by_key(doc, child, "alias")
 
         if name_found && !category_found && !parent_found && !objtypeenum_found && !alias_found && doc.elements[child].children == nil {
-            processed_type, good := process_type(doc, child)
-            assert(good)
-            append(&types_table, processed_type)
+            if processed_type, good := process_type(doc, child); good {
+                append(&types_table, processed_type)
+            }
         }
     }
 }
@@ -2347,9 +2256,7 @@ process_format :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Format, bool)
                 }
 
                 if bits, good := xml.find_attribute_val_by_key(doc, child, "bits"); good {
-                    if bits == "compressed" {
-                        comp.bits = -1
-                    } else {
+                    if bits != "compressed" {
                         comp.bits, _ = strconv.parse_int(bits, 10)
                     }
                 }
@@ -2430,8 +2337,19 @@ process_format :: proc(doc: ^xml.Document, id: xml.Element_ID) -> (Format, bool)
     return result, true
 }
 
+Options :: struct {
+    no_comment: bool,
+}
 
 main :: proc() {
+    options: Options
+
+    for arg in os.args do switch arg {
+        case "--no-comments": {
+            options.no_comment = true 
+        }
+    }
+
     doc, err := xml.load_from_file("./Vulkan-Docs/xml/vk.xml", {flags={.Ignore_Unsupported, .Unbox_CDATA, .Decode_SGML_Entities}})
     defer xml.destroy(doc)
     assert(err == .None)
@@ -2470,19 +2388,17 @@ main :: proc() {
 
     for type_id in doc.elements[table_id].children {
         if doc.elements[type_id].ident == "type" {
-            type_info, good := process_type(doc, type_id)
-            assert(good)
-
-            append(&types_table, type_info)
+            if type_info, good := process_type(doc, type_id); true {
+                append(&types_table, type_info)
+            }
         }
     }
 
     for command_id in doc.elements[commands_table_id].children {
         if doc.elements[command_id].ident == "command" {
-            command_info, good := process_command(doc, command_id)
-            assert(good)
-
-            append(&commands_table, command_info)
+            if command_info, good := process_command(doc, command_id); good {
+                append(&commands_table, command_info)
+            }
         }
     }
 
@@ -2520,9 +2436,9 @@ main :: proc() {
         }
     }
 
-    generate_defines()
+    generate_defines(options)
     generate_enums()
-    generate_types()
+    generate_types(options)
     generate_procs()
     generate_formats()
 
