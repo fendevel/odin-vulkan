@@ -1,6 +1,8 @@
 ols.json
 
 *.exe
+*.pdb
+*.rdbg
 fmtutils
 defines.odin
 enums.odin
